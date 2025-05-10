@@ -25,18 +25,14 @@ services:
   redis:
     image: redis:alpine
     volumes:
-      # Persistent data volume (optional but good practice)
+      # Persistent data volume
       - redis_data:/data
-    # We don't need to expose Redis to the host unless debugging
-    # ports:
-    #   - "6379:6379"
     networks:
       - app-network
 
   api:
     build: . # Build from local Dockerfile
     environment:
-      # Use the service names defined in this compose file
       DATABASE_URL: postgresql://user:password@db:5432/mydatabase
       # FIX: Correct Redis port to 6379
       REDIS_URL: redis://redis:6379/0
@@ -61,8 +57,7 @@ services:
   worker:
     build: . # Build from local Dockerfile
     environment:
-      DATABASE_URL: postgresql://user:password@db:5432/mydatabase
-      # FIX: Correct Redis port to 6379
+      DATABASE_URL: postgresql://user:password@db:5432/mydatabase 
       REDIS_URL: redis://redis:6379/0
       CACHE_TTL_SECONDS: 300
       WEBHOOK_DELIVERY_TIMEOUT_SECONDS: 10
@@ -86,7 +81,6 @@ services:
     build: . # Build from local Dockerfile
     environment:
       DATABASE_URL: postgresql://user:password@db:5432/mydatabase
-      # FIX: Correct Redis port to 6379
       REDIS_URL: redis://redis:6379/0
       LOG_RETENTION_HOURS: 72
     command: celery -A app.celery_app beat -l info # --scheduler ... if using external scheduler
