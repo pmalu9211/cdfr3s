@@ -1,8 +1,11 @@
 import uuid
+from datetime import datetime, timezone, timedelta # <-- Ensure timedelta is imported here
+from typing import List, Optional
+
 from sqlalchemy.orm import Session, joinedload
-from . import models, schemas
-from typing import Optional
-from datetime import datetime, timezone, timedelta
+from sqlalchemy import desc, func
+
+from . import models, schemas # Make sure these imports are correct
 
 # Helper to get timezone-aware current time
 def utcnow():
@@ -17,7 +20,8 @@ def get_subscriptions(db: Session, skip: int = 0, limit: int = 100):
 
 def create_subscription(db: Session, subscription: schemas.SubscriptionCreate):
     db_subscription = models.Subscription(
-        target_url=subscription.target_url,
+        # FIX: Convert the Pydantic HttpUrl object to a string before saving to DB
+        target_url=str(subscription.target_url),
         secret=subscription.secret,
         # event_types=subscription.event_types # For bonus
     )
@@ -29,9 +33,11 @@ def create_subscription(db: Session, subscription: schemas.SubscriptionCreate):
 def update_subscription(db: Session, subscription_id: uuid.UUID, subscription: schemas.SubscriptionCreate):
     db_subscription = db.query(models.Subscription).filter(models.Subscription.id == subscription_id).first()
     if db_subscription:
-        db_subscription.target_url = subscription.target_url
+        # FIX: Convert the Pydantic HttpUrl object to a string before updating in DB
+        db_subscription.target_url = str(subscription.target_url)
         db_subscription.secret = subscription.secret
         # db_subscription.event_types = subscription.event_types # For bonus
+        # updated_at is set by the trigger (or onupdate in model)
         db.commit()
         db.refresh(db_subscription)
     return db_subscription

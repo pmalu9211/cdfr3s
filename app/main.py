@@ -2,20 +2,23 @@ from fastapi import FastAPI, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from typing import List
 import uuid
-from . import crud, models, schemas, tasks
+
+from . import crud, models, schemas
 from .database import SessionLocal, engine, get_db
 from .cache import get_subscription_from_cache, set_subscription_in_cache, invalidate_subscription_cache
+from .config import settings
+
+# Explicitly import tasks to ensure Celery app and tasks are registered
+from . import tasks # <-- Keep this import to register tasks
+
+# Import the celery_app instance directly
+from .celery_app import celery_app # <-- Import celery_app
+
 import logging
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-
-# Create database tables on startup - useful for development
-# In production, migrations are preferred. init.sql handles this via docker-entrypoint.
-# def create_db_tables():
-#     models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="Webhook Delivery Service",
@@ -23,22 +26,16 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Dependency to get cache client
+# Dependency to get cache client (placeholder, cache functions use global client)
 def get_cache_client():
-    # Cache client is global, no need for complex dependency injection here
-    # just import it where needed or pass it explicitly
-    pass # Placeholder, cache functions use the global client
-
+    pass
 
 @app.on_event("startup")
 async def startup_event():
-    # Optional: create tables if using this approach instead of init.sql
-    # create_db_tables()
     logger.info("Application startup complete.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    # Close any resources if necessary
     logger.info("Application shutting down.")
 
 
@@ -104,35 +101,15 @@ async def ingest_webhook(subscription_id: uuid.UUID, webhook: schemas.WebhookIng
         subscription = schemas.SubscriptionRead.model_validate(db_subscription)
         set_subscription_in_cache(subscription) # Cache the subscription
 
-    # Optional: Implement signature verification here (Bonus Point)
-    # if subscription.secret:
-    #     # Get the raw body from the request
-    #     body = await Request.body()
-    #     signature_header = request.headers.get('X-Hub-Signature-256')
-    #     if not signature_header:
-    #         raise HTTPException(status_code=401, detail="Signature header missing")
-    #     expected_signature = calculate_signature(webhook.payload, subscription.secret) # Needs raw body, not parsed payload
-    #     # You would need to calculate signature from the RAW body, not the parsed JSON payload
-    #     # This requires reading body() before FastAPI parses JSON
-    #     # A dependency or middleware could handle this before json parsing
-    #     # Example check (simplified, needs raw body):
-    #     # if not hmac.compare_digest(f"sha256={expected_signature}", signature_header):
-    #     #      raise HTTPException(status_code=401, detail="Invalid signature")
-
-    # Optional: Event type filtering at ingestion (Bonus Point)
-    # event_type = webhook.event_type # Assume event_type is part of the input schema/payload
-    # if subscription.event_types and event_type not in subscription.event_types:
-    #     logger.info(f"Webhook for subscription {subscription_id} skipped due to event type filter: {event_type}")
-    #     # Maybe log a 'skipped' event here? Or just return 202 without queueing.
-    #     # For this example, we will create the webhook but the worker will filter (less efficient)
-    #     # OR the worker task won't be sent based on this check here.
-    #     # Let's assume filtering is worker-side if implemented in tasks.py
-
     # Save the incoming webhook payload
     db_webhook = crud.create_webhook(db, subscription_id, webhook.payload) # Add event_type here if applicable
 
-    # Enqueue the delivery task
-    tasks.process_delivery.send_task(args=[str(db_webhook.id)])
+    # Enqueue the delivery task using the explicit celery_app instance
+    celery_app.send_task(
+        'app.tasks.process_delivery', # Task name as a string
+        args=[str(db_webhook.id)],
+        # Optional: countdown=... for delayed start
+    )
     logger.info(f"Webhook {db_webhook.id} for subscription {subscription_id} ingested and queued.")
 
     # Return 202 Accepted
@@ -148,7 +125,6 @@ def get_webhook_status(webhook_id: uuid.UUID, db: Session = Depends(get_db)):
 
     latest_attempt = None
     if webhook.attempts:
-        # Attempts are ordered by time in the relationship definition
         latest_attempt = webhook.attempts[-1] # Get the last one
 
     # Manually construct the response model including all attempts
@@ -174,6 +150,3 @@ def list_recent_subscription_logs(subscription_id: uuid.UUID, limit: int = 20, d
 
     # Convert SQLAlchemy models to Pydantic schemas
     return [schemas.DeliveryAttemptRead.model_validate(a) for a in attempts]
-
-# Optional: Implement signature calculation helper (needs raw body, complex with FastAPI's default JSON parsing)
-# See notes in ingest_webhook for complexity
