@@ -1,15 +1,11 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 import uuid
 
-from . import crud, models, schemas
-from .database import SessionLocal, engine, get_db
+from . import crud, schemas
+from .database import get_db
 from .cache import get_subscription_from_cache, set_subscription_in_cache, invalidate_subscription_cache
-from .config import settings
-
-# Explicitly import tasks to ensure Celery app and tasks are registered
-from . import tasks # <-- Keep this import to register tasks
 
 # Import the celery_app instance directly
 from .celery_app import celery_app # <-- Import celery_app

@@ -1,9 +1,8 @@
 import uuid
 from datetime import datetime, timezone, timedelta # <-- Ensure timedelta is imported here
-from typing import List, Optional
+from typing import Optional
 
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, func
 
 from . import models, schemas # Make sure these imports are correct
 

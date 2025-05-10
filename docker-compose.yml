@@ -14,7 +14,7 @@ services:
       # Initialize schema on first run
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck: # Add healthcheck
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD", "pg_isready", "-U", "user", "-d", "mydatabase"]
       interval: 5s
       timeout: 5s
       retries: 5
