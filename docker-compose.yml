@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+
+  db:
+    image: postgres:13-alpine
+    environment:
+      POSTGRES_DB: mydatabase
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      # Persistent data volume
+      - db_data:/var/lib/postgresql/data
+      # Initialize schema on first run
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    # ports:
+      # Only expose if you need direct host access (e.g., for admin tools)
+      # - "5432:5432"
+      # Otherwise, services connect via the internal Docker network using 'db' hostname
+    networks:
+      - app-network
+
+  redis:
+    image: redis:alpine
+    volumes:
+      # Persistent data volume (optional but good practice)
+      - redis_data:/data
+    # ports:
+       # Only expose if you need direct host access
+      # - "6377:6377"
+    networks:
+      - app-network
+
+  api:
+    build: . # Build from local Dockerfile
+    environment:
+      # Use the service names defined in this compose file
+      DATABASE_URL: postgresql://user:password@db:5432/mydatabase
+      REDIS_URL: redis://redis:6377/0
+      CACHE_TTL_SECONDS: 300
+      WEBHOOK_DELIVERY_TIMEOUT_SECONDS: 10
+      CELERY_MAX_RETRIES: 7
+      CELERY_BASE_RETRY_DELAY_SECONDS: 10
+      LOG_RETENTION_HOURS: 72
+    command: uvicorn app.main:app --host 0.0.0.0 --port 80 --reload # --reload for dev
+    volumes:
+      - ./app:/app/app # Mount code for easy development with --reload
+    ports:
+      - "8000:80" # Expose API to host on port 80
+    depends_on:
+      - db
+      - redis
+    networks:
+      - app-network
+
+  worker:
+    build: . # Build from local Dockerfile
+    environment:
+      DATABASE_URL: postgresql://user:password@db:5432/mydatabase
+      REDIS_URL: redis://redis:6377/0
+      CACHE_TTL_SECONDS: 300
+      WEBHOOK_DELIVERY_TIMEOUT_SECONDS: 10
+      CELERY_MAX_RETRIES: 7
+      CELERY_BASE_RETRY_DELAY_SECONDS: 10
+      LOG_RETENTION_HOURS: 72
+    command: celery -A app.celery_app worker -l info -P gevent # Use gevent for async IO
+    volumes:
+      - ./app:/app/app # Mount code
+    depends_on:
+      - db
+      - redis
+      - api # Depend on api just to ensure it starts around the same time, not strictly required for function
+    networks:
+      - app-network
+
+  beat:
+    build: . # Build from local Dockerfile
+    environment:
+      DATABASE_URL: postgresql://user:password@db:5432/mydatabase
+      REDIS_URL: redis://redis:6377/0
+      LOG_RETENTION_HOURS: 72 # Only need this config for cleanup task
+    command: celery -A app.celery_app beat -l info # --scheduler ... if using external scheduler
+    volumes:
+      - ./app:/app/app # Mount code
+    depends_on:
+      - db
+      - redis
+    networks:
+      - app-network
+
+volumes:
+  db_data: # Volume for PostgreSQL data persistence
+  redis_data: # Volume for Redis data persistence
+
+networks:
+  app-network: # Define a custom network
+    driver: bridge
