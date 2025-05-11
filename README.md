@@ -111,6 +111,7 @@ The application is deployed and accessible at:
 
 The Swagger UI is available at:
 - http://segwise.prathamalu.xyz/docs
+- http://3.95.205.129/docs
 
 ## Architecture Choices
 ## [Detailed](https://docs.google.com/document/d/1wExzr45BGNzQSuNFJ_ZRWGkyRBVPMEcbsnCXrOoIqqo/edit?usp=sharing)
