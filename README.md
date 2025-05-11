@@ -113,6 +113,7 @@ The Swagger UI is available at:
 - http://segwise.prathamalu.xyz/docs
 
 ## Architecture Choices
+## [Detailed](https://docs.google.com/document/d/1wExzr45BGNzQSuNFJ_ZRWGkyRBVPMEcbsnCXrOoIqqo/edit?usp=sharing)
 
 - **FastAPI**: Chosen for its high performance, ease of use, automatic interactive API documentation (Swagger UI), and built-in support for asynchronous operations, which aligns well with the non-blocking nature of webhook ingestion.
 - **Celery**: A powerful and mature distributed task queue. Essential for decoupling webhook ingestion from the delivery process, handling retries with configurable strategies, and scheduling background tasks like log cleanup.
