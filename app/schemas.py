@@ -1,11 +1,12 @@
 import uuid
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 class SubscriptionBase(BaseModel):
     target_url: HttpUrl
     secret: Optional[str] = None
+    event_types: Optional[List[str]] = Field(default_factory=list) # Default to empty list
 
 class SubscriptionCreate(SubscriptionBase):
     pass
@@ -14,6 +15,7 @@ class SubscriptionRead(SubscriptionBase):
     id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+    event_types: Optional[List[str]] = None # Reads from DB, can be None
 
     class Config:
         from_attributes = True
@@ -21,6 +23,7 @@ class SubscriptionRead(SubscriptionBase):
 
 class WebhookIngest(BaseModel):
     payload: Dict[str, Any]
+    event_type: Optional[str] = None # Event type expected in the payload
 
 class DeliveryAttemptRead(BaseModel):
     id: uuid.UUID
