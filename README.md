@@ -645,6 +645,7 @@ Please note that while test files are included in the repository (`tests/` direc
 
 ## Credits
 
+- [Chatgpt](https://chat.openai.com/)
 - [FastAPI](https://fastapi.tiangolo.com/)
 - [Celery](https://docs.celeryq.dev/)
 - [Redis](https://redis.io/)
