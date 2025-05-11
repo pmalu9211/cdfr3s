@@ -1,13 +1,11 @@
 import requests
-import time
-import math
 import uuid
 from celery import shared_task
 from celery.exceptions import Retry
 from sqlalchemy.orm import Session
 from .database import SessionLocal
-from . import crud, models, schemas
-from .cache import get_subscription_from_cache, set_subscription_in_cache, invalidate_subscription_cache
+from . import crud, schemas
+from .cache import get_subscription_from_cache, set_subscription_in_cache
 from .config import settings
 from datetime import datetime, timezone, timedelta
 import logging
@@ -30,7 +28,6 @@ def process_delivery(self, webhook_id: str):
     webhook = None
     subscription = None
     attempt_number = self.request.retries + 1 # Current attempt number (1 for first attempt)
-    # Initialize next_attempt_at_for_log to None by default
     next_attempt_at_for_log = None
 
     logger.info(f"Attempt {attempt_number} for webhook {webhook_id}")
@@ -78,7 +75,6 @@ def process_delivery(self, webhook_id: str):
                 json=payload,
                 timeout=settings.webhook_delivery_timeout_seconds,
                 headers=headers,
-                # Disable verify for testing against local http servers if needed, BE CAREFUL
                 # verify=False
             )
             status_code = response.status_code

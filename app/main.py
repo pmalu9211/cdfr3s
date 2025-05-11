@@ -1,15 +1,11 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request, Query # Import Query
-from sqlalchemy.orm import Session, joinedload
+from fastapi import FastAPI, Depends, HTTPException, status, Query # Import Query
+from sqlalchemy.orm import Session
 from typing import List
 import uuid
 
-from . import crud, models, schemas
-from .database import SessionLocal, engine, get_db
+from . import crud, schemas
+from .database import get_db
 from .cache import get_subscription_from_cache, set_subscription_in_cache, invalidate_subscription_cache
-from .config import settings
-
-# Explicitly import tasks to ensure Celery app and tasks are registered
-from . import tasks
 
 # Import the celery_app instance directly
 from .celery_app import celery_app
@@ -108,7 +104,6 @@ async def ingest_webhook(subscription_id: uuid.UUID, webhook: schemas.WebhookIng
     celery_app.send_task(
         'app.tasks.process_delivery', # Task name as a string
         args=[str(db_webhook.id)],
-        # Optional: countdown=... for delayed start
     )
     logger.info(f"Webhook {db_webhook.id} for subscription {subscription_id} ingested and queued.")
 
@@ -138,8 +133,8 @@ def get_webhook_status(webhook_id: uuid.UUID, db: Session = Depends(get_db)):
         latest_attempt=schemas.DeliveryAttemptRead(
             id=latest_attempt.id,
             webhook_id=latest_attempt.webhook_id,
-            subscription_id=webhook.subscription.id, # Get from webhook -> subscription relationship
-            target_url=webhook.subscription.target_url, # Get from webhook -> subscription relationship
+            subscription_id=webhook.subscription.id,
+            target_url=webhook.subscription.target_url,
             attempt_number=latest_attempt.attempt_number,
             attempted_at=latest_attempt.attempted_at,
             outcome=latest_attempt.outcome,
@@ -151,8 +146,8 @@ def get_webhook_status(webhook_id: uuid.UUID, db: Session = Depends(get_db)):
             schemas.DeliveryAttemptRead(
                 id=a.id,
                 webhook_id=a.webhook_id,
-                subscription_id=webhook.subscription.id, # Get from webhook -> subscription relationship
-                target_url=webhook.subscription.target_url, # Get from webhook -> subscription relationship
+                subscription_id=webhook.subscription.id,
+                target_url=webhook.subscription.target_url,
                 attempt_number=a.attempt_number,
                 attempted_at=a.attempted_at,
                 outcome=a.outcome,

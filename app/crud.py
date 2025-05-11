@@ -1,11 +1,10 @@
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import Optional
 
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, func
 
-from . import models, schemas # Make sure these imports are correct
+from . import models, schemas
 
 # Helper to get timezone-aware current time
 def utcnow():
@@ -22,7 +21,6 @@ def create_subscription(db: Session, subscription: schemas.SubscriptionCreate):
     db_subscription = models.Subscription(
         target_url=str(subscription.target_url), # Convert HttpUrl to string
         secret=subscription.secret,
-        # event_types=subscription.event_types # For bonus
     )
     db.add(db_subscription)
     db.commit()
@@ -32,10 +30,8 @@ def create_subscription(db: Session, subscription: schemas.SubscriptionCreate):
 def update_subscription(db: Session, subscription_id: uuid.UUID, subscription: schemas.SubscriptionCreate):
     db_subscription = db.query(models.Subscription).filter(models.Subscription.id == subscription_id).first()
     if db_subscription:
-        db_subscription.target_url = str(subscription.target_url) # Convert HttpUrl to string
+        db_subscription.target_url = str(subscription.target_url)
         db_subscription.secret = subscription.secret
-        # db_subscription.event_types = subscription.event_types # For bonus
-        # updated_at is set by the trigger (or onupdate in model)
         db.commit()
         db.refresh(db_subscription)
     return db_subscription
@@ -53,7 +49,7 @@ def create_webhook(db: Session, subscription_id: uuid.UUID, payload: dict, event
         subscription_id=subscription_id,
         payload=payload,
         event_type=event_type,
-        status="queued" # Initial status
+        status="queued"
     )
     db.add(db_webhook)
     db.commit()

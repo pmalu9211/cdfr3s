@@ -6,7 +6,6 @@ from datetime import datetime
 class SubscriptionBase(BaseModel):
     target_url: HttpUrl
     secret: Optional[str] = None
-    # event_types: Optional[List[str]] = None # For bonus
 
 class SubscriptionCreate(SubscriptionBase):
     pass
@@ -17,30 +16,27 @@ class SubscriptionRead(SubscriptionBase):
     updated_at: datetime
 
     class Config:
-        from_attributes = True # Allow mapping from SQLAlchemy models
+        from_attributes = True
 
 
 class WebhookIngest(BaseModel):
-    # Assume payload is arbitrary JSON
     payload: Dict[str, Any]
-    # event_type: Optional[str] = None # For bonus
 
 class DeliveryAttemptRead(BaseModel):
     id: uuid.UUID
     webhook_id: uuid.UUID
-    # Ensure these fields are present for log output
     subscription_id: uuid.UUID
-    target_url: HttpUrl # Use HttpUrl for validation/typing
+    target_url: HttpUrl
 
     attempt_number: int
     attempted_at: datetime
     outcome: str
     http_status_code: Optional[int] = None
-    error_details: Optional[str] = None # This will contain more detail from the worker
+    error_details: Optional[str] = None
     next_attempt_at: Optional[datetime] = None
 
     class Config:
-        from_attributes = True # Allow mapping from SQLAlchemy models
+        from_attributes = True
 
 
 class WebhookStatusRead(BaseModel):
@@ -49,7 +45,7 @@ class WebhookStatusRead(BaseModel):
     ingested_at: datetime
     status: str
     latest_attempt: Optional[DeliveryAttemptRead] = None
-    attempts: List[DeliveryAttemptRead] # Include all attempts for detail view
+    attempts: List[DeliveryAttemptRead]
 
     class Config:
         from_attributes = True
