@@ -1,14 +1,18 @@
-from fastapi import FastAPI, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Query # Import Query
+from sqlalchemy.orm import Session, joinedload
 from typing import List
 import uuid
 
-from . import crud, schemas
-from .database import get_db
+from . import crud, models, schemas
+from .database import SessionLocal, engine, get_db
 from .cache import get_subscription_from_cache, set_subscription_in_cache, invalidate_subscription_cache
+from .config import settings
+
+# Explicitly import tasks to ensure Celery app and tasks are registered
+from . import tasks
 
 # Import the celery_app instance directly
-from .celery_app import celery_app # <-- Import celery_app
+from .celery_app import celery_app
 
 import logging
 
@@ -115,7 +119,8 @@ async def ingest_webhook(subscription_id: uuid.UUID, webhook: schemas.WebhookIng
 # --- Status and Analytics ---
 @app.get("/status/{webhook_id}", response_model=schemas.WebhookStatusRead)
 def get_webhook_status(webhook_id: uuid.UUID, db: Session = Depends(get_db)):
-    webhook = crud.get_webhook_with_attempts(db, webhook_id) # Eager load attempts
+    # Use the updated crud function that eager loads subscription
+    webhook = crud.get_webhook_with_attempts(db, webhook_id)
     if not webhook:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Webhook not found")
 
@@ -123,26 +128,91 @@ def get_webhook_status(webhook_id: uuid.UUID, db: Session = Depends(get_db)):
     if webhook.attempts:
         latest_attempt = webhook.attempts[-1] # Get the last one
 
-    # Manually construct the response model including all attempts
+    # Manually construct the response model, mapping data from joined tables
+    # The webhook object now has webhook.subscription populated due to the joinedload in crud
     status_read = schemas.WebhookStatusRead(
         id=webhook.id,
         subscription_id=webhook.subscription_id,
         ingested_at=webhook.ingested_at,
         status=webhook.status,
-        latest_attempt=schemas.DeliveryAttemptRead.model_validate(latest_attempt) if latest_attempt else None,
-        attempts=[schemas.DeliveryAttemptRead.model_validate(a) for a in webhook.attempts]
+        latest_attempt=schemas.DeliveryAttemptRead(
+            id=latest_attempt.id,
+            webhook_id=latest_attempt.webhook_id,
+            subscription_id=webhook.subscription.id, # Get from webhook -> subscription relationship
+            target_url=webhook.subscription.target_url, # Get from webhook -> subscription relationship
+            attempt_number=latest_attempt.attempt_number,
+            attempted_at=latest_attempt.attempted_at,
+            outcome=latest_attempt.outcome,
+            http_status_code=latest_attempt.http_status_code,
+            error_details=latest_attempt.error_details,
+            next_attempt_at=latest_attempt.next_attempt_at
+        ) if latest_attempt else None,
+        attempts=[
+            schemas.DeliveryAttemptRead(
+                id=a.id,
+                webhook_id=a.webhook_id,
+                subscription_id=webhook.subscription.id, # Get from webhook -> subscription relationship
+                target_url=webhook.subscription.target_url, # Get from webhook -> subscription relationship
+                attempt_number=a.attempt_number,
+                attempted_at=a.attempted_at,
+                outcome=a.outcome,
+                http_status_code=a.http_status_code,
+                error_details=a.error_details,
+                next_attempt_at=a.next_attempt_at
+            ) for a in webhook.attempts
+        ]
     )
     return status_read
 
 
 @app.get("/subscriptions/{subscription_id}/logs", response_model=List[schemas.DeliveryAttemptRead])
-def list_recent_subscription_logs(subscription_id: uuid.UUID, limit: int = 20, db: Session = Depends(get_db)):
+def list_recent_subscription_logs(subscription_id: uuid.UUID, limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)):
     # Verify subscription exists first
     subscription = crud.get_subscription(db, subscription_id)
     if not subscription:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found")
 
-    attempts = crud.list_recent_delivery_attempts_for_subscription(db, subscription_id, limit=limit)
+    # Use the updated crud function that joins tables to get the required data
+    attempts_data = crud.list_recent_delivery_attempts_for_subscription(db, subscription_id, limit=limit)
 
-    # Convert SQLAlchemy models to Pydantic schemas
-    return [schemas.DeliveryAttemptRead.model_validate(a) for a in attempts]
+    # Manually map the results (which are Row objects from the joined query) to the Pydantic schema
+    attempts = [
+        schemas.DeliveryAttemptRead(
+            id=data.id,
+            webhook_id=data.webhook_id,
+            subscription_id=data.subscription_id,
+            target_url=data.target_url,
+            attempt_number=data.attempt_number,
+            attempted_at=data.attempted_at,
+            outcome=data.outcome,
+            http_status_code=data.http_status_code,
+            error_details=data.error_details,
+            next_attempt_at=data.next_attempt_at
+        ) for data in attempts_data
+    ]
+
+    return attempts
+
+# New endpoint to get all delivery logs
+@app.get("/logs/", response_model=List[schemas.DeliveryAttemptRead])
+def list_all_logs(skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100), db: Session = Depends(get_db)):
+    # Use the new crud function to get all logs with subscription details
+    attempts_data = crud.list_all_delivery_attempts(db, skip=skip, limit=limit)
+
+    # Manually map the results (Row objects) to the Pydantic schema
+    attempts = [
+        schemas.DeliveryAttemptRead(
+            id=data.id,
+            webhook_id=data.webhook_id,
+            subscription_id=data.subscription_id,
+            target_url=data.target_url,
+            attempt_number=data.attempt_number,
+            attempted_at=data.attempted_at,
+            outcome=data.outcome,
+            http_status_code=data.http_status_code,
+            error_details=data.error_details,
+            next_attempt_at=data.next_attempt_at
+        ) for data in attempts_data
+    ]
+
+    return attempts

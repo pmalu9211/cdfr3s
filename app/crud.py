@@ -1,8 +1,9 @@
 import uuid
-from datetime import datetime, timezone, timedelta # <-- Ensure timedelta is imported here
-from typing import Optional
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional
 
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import desc, func
 
 from . import models, schemas # Make sure these imports are correct
 
@@ -19,8 +20,7 @@ def get_subscriptions(db: Session, skip: int = 0, limit: int = 100):
 
 def create_subscription(db: Session, subscription: schemas.SubscriptionCreate):
     db_subscription = models.Subscription(
-        # FIX: Convert the Pydantic HttpUrl object to a string before saving to DB
-        target_url=str(subscription.target_url),
+        target_url=str(subscription.target_url), # Convert HttpUrl to string
         secret=subscription.secret,
         # event_types=subscription.event_types # For bonus
     )
@@ -32,8 +32,7 @@ def create_subscription(db: Session, subscription: schemas.SubscriptionCreate):
 def update_subscription(db: Session, subscription_id: uuid.UUID, subscription: schemas.SubscriptionCreate):
     db_subscription = db.query(models.Subscription).filter(models.Subscription.id == subscription_id).first()
     if db_subscription:
-        # FIX: Convert the Pydantic HttpUrl object to a string before updating in DB
-        db_subscription.target_url = str(subscription.target_url)
+        db_subscription.target_url = str(subscription.target_url) # Convert HttpUrl to string
         db_subscription.secret = subscription.secret
         # db_subscription.event_types = subscription.event_types # For bonus
         # updated_at is set by the trigger (or onupdate in model)
@@ -61,10 +60,11 @@ def create_webhook(db: Session, subscription_id: uuid.UUID, payload: dict, event
     db.refresh(db_webhook)
     return db_webhook
 
+# Updated to eager load subscription for target_url and subscription_id
 def get_webhook_with_attempts(db: Session, webhook_id: uuid.UUID):
-     # Eager load attempts for the status endpoint
+     # Eager load attempts AND the related subscription
     return db.query(models.Webhook)\
-             .options(joinedload(models.Webhook.attempts))\
+             .options(joinedload(models.Webhook.attempts).joinedload(models.DeliveryAttempt.webhook).joinedload(models.Webhook.subscription))\
              .filter(models.Webhook.id == webhook_id).first()
 
 def get_webhook(db: Session, webhook_id: uuid.UUID):
@@ -101,26 +101,63 @@ def create_delivery_attempt(
     return db_attempt
 
 def get_delivery_attempts_for_webhook(db: Session, webhook_id: uuid.UUID):
+    # This function is not used by the API endpoints directly, but keep for completeness
     return db.query(models.DeliveryAttempt)\
              .filter(models.DeliveryAttempt.webhook_id == webhook_id)\
              .order_by(models.DeliveryAttempt.attempted_at)\
              .all()
 
 def get_latest_attempt_for_webhook(db: Session, webhook_id: uuid.UUID):
+     # This function is not used by the API endpoints directly, but keep for completeness
      return db.query(models.DeliveryAttempt)\
               .filter(models.DeliveryAttempt.webhook_id == webhook_id)\
               .order_by(models.DeliveryAttempt.attempted_at.desc())\
               .first()
 
+# Updated to join webhooks and subscriptions to get subscription_id and target_url
 def list_recent_delivery_attempts_for_subscription(db: Session, subscription_id: uuid.UUID, limit: int = 20):
-    # This query is a bit complex: get attempts, join webhooks, filter by sub_id, order by attempt time.
-    # Could optimize with materialized views or dedicated logging sink for high volume.
-    return db.query(models.DeliveryAttempt)\
-             .join(models.Webhook)\
+    # Select columns explicitly from joined tables
+    return db.query(
+                models.DeliveryAttempt.id,
+                models.DeliveryAttempt.webhook_id,
+                models.Webhook.subscription_id, # Select subscription_id from webhook
+                models.Subscription.target_url, # Select target_url from subscription
+                models.DeliveryAttempt.attempt_number,
+                models.DeliveryAttempt.attempted_at,
+                models.DeliveryAttempt.outcome,
+                models.DeliveryAttempt.http_status_code,
+                models.DeliveryAttempt.error_details,
+                models.DeliveryAttempt.next_attempt_at
+            )\
+             .join(models.Webhook, models.DeliveryAttempt.webhook_id == models.Webhook.id)\
+             .join(models.Subscription, models.Webhook.subscription_id == models.Subscription.id)\
              .filter(models.Webhook.subscription_id == subscription_id)\
              .order_by(models.DeliveryAttempt.attempted_at.desc())\
              .limit(limit)\
              .all()
+
+# New function to list all delivery attempts
+def list_all_delivery_attempts(db: Session, skip: int = 0, limit: int = 100):
+     # Select columns explicitly from joined tables
+    return db.query(
+                models.DeliveryAttempt.id,
+                models.DeliveryAttempt.webhook_id,
+                models.Webhook.subscription_id, # Select subscription_id from webhook
+                models.Subscription.target_url, # Select target_url from subscription
+                models.DeliveryAttempt.attempt_number,
+                models.DeliveryAttempt.attempted_at,
+                models.DeliveryAttempt.outcome,
+                models.DeliveryAttempt.http_status_code,
+                models.DeliveryAttempt.error_details,
+                models.DeliveryAttempt.next_attempt_at
+            )\
+             .join(models.Webhook, models.DeliveryAttempt.webhook_id == models.Webhook.id)\
+             .join(models.Subscription, models.Webhook.subscription_id == models.Subscription.id)\
+             .order_by(models.DeliveryAttempt.attempted_at.desc())\
+             .offset(skip)\
+             .limit(limit)\
+             .all()
+
 
 def cleanup_old_logs(db: Session, retention_hours: int):
     time_threshold = utcnow() - timedelta(hours=retention_hours)
@@ -132,9 +169,7 @@ def cleanup_old_logs(db: Session, retention_hours: int):
 
     # Delete webhooks that have no remaining attempts and are older than the threshold
     # (This is a safer approach to avoid deleting webhooks that still have recent retry attempts)
-    # A simpler approach for this assignment is to delete webhooks if ALL attempts are older,
-    # or just delete webhooks older than the threshold IF they are not 'queued' or 'processing'.
-    # Let's go with a simple delete of webhooks whose *ingestion time* is older than the threshold
+    # A simpler approach for this assignment is to delete webhooks whose *ingestion time* is older than the threshold
     # and whose status is final ('succeeded' or 'failed'). This prevents deleting webhooks
     # that might still have pending retries even if ingested long ago.
     deleted_webhooks_count = db.query(models.Webhook)\

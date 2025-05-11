@@ -28,15 +28,20 @@ class WebhookIngest(BaseModel):
 class DeliveryAttemptRead(BaseModel):
     id: uuid.UUID
     webhook_id: uuid.UUID
+    # Ensure these fields are present for log output
+    subscription_id: uuid.UUID
+    target_url: HttpUrl # Use HttpUrl for validation/typing
+
     attempt_number: int
     attempted_at: datetime
     outcome: str
     http_status_code: Optional[int] = None
-    error_details: Optional[str] = None
+    error_details: Optional[str] = None # This will contain more detail from the worker
     next_attempt_at: Optional[datetime] = None
 
     class Config:
-        from_attributes = True
+        from_attributes = True # Allow mapping from SQLAlchemy models
+
 
 class WebhookStatusRead(BaseModel):
     id: uuid.UUID

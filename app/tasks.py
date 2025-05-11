@@ -1,14 +1,15 @@
 import requests
+import time
+import math
 import uuid
-from datetime import datetime, timezone, timedelta
 from celery import shared_task
 from celery.exceptions import Retry
 from sqlalchemy.orm import Session
 from .database import SessionLocal
-from . import crud, schemas
-from .cache import get_subscription_from_cache, set_subscription_in_cache
+from . import crud, models, schemas
+from .cache import get_subscription_from_cache, set_subscription_in_cache, invalidate_subscription_cache
 from .config import settings
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 
 # Configure basic logging
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 def utcnow():
     return datetime.now(timezone.utc)
 
-@shared_task(bind=True, max_retries=settings.celery_max_retries, default_retry_delay=settings.celery_base_retry_delay_seconds)
+@shared_task(bind=True, max_retries=settings.celery_max_retries, default_retry_backoff=True, default_retry_delay=settings.celery_base_retry_delay_seconds)
 def process_delivery(self, webhook_id: str):
     """
     Celery task to process a webhook delivery attempt.
@@ -29,7 +30,8 @@ def process_delivery(self, webhook_id: str):
     webhook = None
     subscription = None
     attempt_number = self.request.retries + 1 # Current attempt number (1 for first attempt)
-    next_attempt_at = None # Will be set if retrying
+    # Initialize next_attempt_at_for_log to None by default
+    next_attempt_at_for_log = None
 
     logger.info(f"Attempt {attempt_number} for webhook {webhook_id}")
 
@@ -38,8 +40,7 @@ def process_delivery(self, webhook_id: str):
         webhook = crud.get_webhook(db, webhook_uuid)
         if not webhook:
             logger.error(f"Webhook {webhook_id} not found. Skipping delivery.")
-            # Maybe log this as a permanent failure in a separate system if needed,
-            # but no DB update here as the webhook record is gone.
+            # If webhook record is already gone, we can't log the permanent failure against it.
             return
 
         # Get subscription details (try cache first)
@@ -49,6 +50,7 @@ def process_delivery(self, webhook_id: str):
             db_subscription = crud.get_subscription(db, webhook.subscription_id)
             if not db_subscription:
                 logger.error(f"Subscription {webhook.subscription_id} not found for webhook {webhook_id}. Skipping delivery.")
+                 # Log permanent failure directly if sub is gone
                 crud.create_delivery_attempt(
                     db, webhook_uuid, attempt_number, "permanently_failed",
                     error_details=f"Subscription {webhook.subscription_id} not found."
@@ -59,36 +61,25 @@ def process_delivery(self, webhook_id: str):
             subscription = schemas.SubscriptionRead.model_validate(db_subscription)
             set_subscription_in_cache(subscription)
 
-        target_url = subscription.target_url
+        target_url = str(subscription.target_url) # Ensure it's a string for requests
         payload = webhook.payload
-
-        # Optional: Implement event type filtering here if the bonus is done
-        # if subscription.event_types and webhook.event_type not in subscription.event_types:
-        #     logger.info(f"Webhook {webhook_id} event type '{webhook.event_type}' does not match subscription filter. Skipping delivery.")
-        #     # Log skipped attempt? Or just don't create the task in ingestion?
-        #     # If filtered here, should log a 'skipped' attempt.
-        #     # Let's assume filtering happens during ingestion for this example.
 
         # Perform HTTP POST request
         response = None
         status_code = None
         error_details = None
-        outcome = "attempted" # Default outcome before success or failure
+        outcome = "failed_attempt" # Default outcome if request fails
 
         try:
-            # Optional: Add signature header if secret is present (Bonus)
-            # headers = {"Content-Type": "application/json"}
-            # if subscription.secret:
-            #     signature = calculate_signature(payload, subscription.secret) # Implement this function
-            #     headers['X-Hub-Signature-256'] = f"sha256={signature}"
-
             headers = {"Content-Type": "application/json"} # Basic headers
 
             response = requests.post(
                 target_url,
                 json=payload,
                 timeout=settings.webhook_delivery_timeout_seconds,
-                headers=headers
+                headers=headers,
+                # Disable verify for testing against local http servers if needed, BE CAREFUL
+                # verify=False
             )
             status_code = response.status_code
             logger.info(f"Webhook {webhook_id} attempt {attempt_number} to {target_url} returned status code: {status_code}")
@@ -96,35 +87,50 @@ def process_delivery(self, webhook_id: str):
             if 200 <= status_code < 300:
                 outcome = "succeeded"
                 crud.update_webhook_status(db, webhook_uuid, "succeeded")
+                logger.info(f"Webhook {webhook_id} successfully delivered on attempt {attempt_number}.")
             else:
+                # Enhanced error details for non-2xx responses
                 outcome = "failed_attempt"
                 error_details = f"HTTP Status Code: {status_code}"
-                # Optionally include response body preview:
-                # error_details += f", Response Body Preview: {response.text[:200]}"
+                try:
+                     # Attempt to include response body preview
+                     response_text = response.text
+                     if response_text:
+                         error_details += f", Response Body: {response_text[:500]}" # Limit size
+                except Exception:
+                     pass # Handle cases where response.text fails
 
         except requests.exceptions.Timeout:
             outcome = "failed_attempt"
             error_details = f"HTTP Timeout after {settings.webhook_delivery_timeout_seconds} seconds."
             logger.warning(f"Webhook {webhook_id} attempt {attempt_number} timed out.")
-        except requests.exceptions.ConnectionError as e:
-            outcome = "failed_attempt"
-            error_details = f"Connection Error: {e}"
-            logger.warning(f"Webhook {webhook_id} attempt {attempt_number} connection error: {e}")
+        except requests.exceptions.RequestException as e: # Catch all requests exceptions
+             outcome = "failed_attempt"
+             # Include exception type and message
+             error_details = f"Request Error: {e.__class__.__name__} - {e}"
+             logger.warning(f"Webhook {webhook_id} attempt {attempt_number} request error: {e}")
         except Exception as e:
+            # Catch any other unexpected errors during the request part
             outcome = "failed_attempt"
-            error_details = f"An unexpected error occurred during request: {e}"
-            logger.error(f"Webhook {webhook_id} attempt {attempt_number} unexpected error: {e}")
+            error_details = f"An unexpected error occurred during request: {e.__class__.__name__} - {e}"
+            logger.error(f"Webhook {webhook_id} attempt {attempt_number} unexpected error during request: {e}")
 
-        # Log the delivery attempt
-        if outcome == "failed_attempt" and attempt_number < settings.celery_max_retries:
-             # Calculate next retry time
-            delay = settings.celery_base_retry_delay_seconds * (2**(attempt_number - 1))
-            # Optional: cap the delay at a maximum value
-            # max_delay = 3600 # e.g., 1 hour
-            # delay = min(delay, max_delay)
-            next_attempt_at = utcnow() + timedelta(seconds=delay)
-            logger.info(f"Scheduling retry {attempt_number + 1} for webhook {webhook_id} in {delay} seconds.")
+        # --- Logic for Retries and Logging ---
 
+        # Check if a retry is possible *before* logging the attempt
+        is_eligible_for_retry = outcome == "failed_attempt" and attempt_number < settings.celery_max_retries
+
+        if is_eligible_for_retry:
+             # Calculate the delay for the *next* attempt for logging purposes
+             # Celery's built-in backoff handles the actual scheduling delay
+             delay = settings.celery_base_retry_delay_seconds * (2**(attempt_number - 1))
+             # Optional: cap the delay at a maximum value (e.g., 1 hour)
+             # max_delay = 3600
+             # delay = min(delay, max_delay)
+             next_attempt_at_for_log = utcnow() + timedelta(seconds=delay)
+             logger.info(f"Attempt {attempt_number} failed. Next retry ({attempt_number + 1}) scheduled around: {next_attempt_at_for_log}")
+
+        # Log the delivery attempt record
         attempt = crud.create_delivery_attempt(
             db,
             webhook_uuid,
@@ -132,33 +138,55 @@ def process_delivery(self, webhook_id: str):
             outcome,
             status_code,
             error_details,
-            next_attempt_at
+            next_attempt_at_for_log # Use the calculated value (will be None if no retry)
         )
+        logger.info(f"Logged attempt {attempt.id} for webhook {webhook_id}: {outcome}")
 
-        # If failed and eligible for retry, raise Retry exception
-        if outcome == "failed_attempt" and attempt_number < settings.celery_max_retries:
-            raise self.retry(countdown=delay, exc=RuntimeError(error_details)) # Use Runtime error to capture details
+
+        # If failed and eligible for retry, raise Retry exception to trigger Celery retry
+        if is_eligible_for_retry:
+             # The self.retry call handles the actual scheduling in Celery's queue.
+             # The countdown parameter here is just for this specific retry call,
+             # but default_retry_backoff=True makes Celery calculate the actual delay.
+             # We already calculated the delay and next_attempt_at_for_log for the log entry.
+             raise self.retry(exc=RuntimeError(error_details)) # Re-raise with details for visibility
 
         # If failed and no more retries
-        if outcome == "failed_attempt" and attempt_number >= settings.celery_max_retries:
+        if outcome == "failed_attempt" and not is_eligible_for_retry:
              crud.update_webhook_status(db, webhook_uuid, "failed")
              logger.warning(f"Webhook {webhook_id} permanently failed after {attempt_number} attempts.")
+             # No retry needed, task is finished
 
+        # If successful, the task finishes here.
 
     except Retry:
-        # Celery handles the retry, just pass
-        pass
+        # This block is executed when self.retry is called.
+        # Celery handles the retry logic. The current task instance will stop here.
+        logger.info(f"Webhook {webhook_id} attempt {attempt_number} failed, retry scheduled by Celery.")
+        pass # Do nothing else in this task instance
+
     except Exception as e:
-        # Catch any unexpected errors that weren't handled, log permanent failure
-        logger.critical(f"Unhandled exception processing webhook {webhook_id} attempt {attempt_number}: {e}", exc_info=True)
-        if webhook: # Ensure webhook object exists before attempting DB update
-             crud.create_delivery_attempt(
-                db, webhook_uuid, attempt_number, "permanently_failed",
-                error_details=f"Unhandled error: {e}"
-             )
-             crud.update_webhook_status(db, webhook_uuid, "failed")
+        # Catch any unexpected errors that weren't handled by specific try/except blocks
+        logger.critical(f"Unhandled critical exception processing webhook {webhook_id} attempt {attempt_number}: {e}", exc_info=True)
+        # Log this as a permanent failure if the webhook object exists
+        if webhook:
+             try:
+                 # Ensure next_attempt_at is None for a permanent failure log
+                 crud.create_delivery_attempt(
+                    db, webhook_uuid, attempt_number, "permanently_failed",
+                    error_details=f"Unhandled critical error: {e.__class__.__name__} - {e}",
+                    next_attempt_at=None # Explicitly set to None for permanent failure
+                 )
+                 crud.update_webhook_status(db, webhook_uuid, "failed")
+                 logger.warning(f"Webhook {webhook_id} marked as permanently failed due to critical error.")
+             except Exception as db_error:
+                 logger.critical(f"Failed to log permanent failure for webhook {webhook_id} after critical error: {db_error}", exc_info=True)
+        else:
+             logger.critical(f"Webhook object missing when attempting to log critical failure for {webhook_id}. Cannot log.")
     finally:
-        db.close() # Ensure DB session is closed
+        # Always ensure the database session is closed
+        if db:
+            db.close()
 
 
 @shared_task
@@ -174,14 +202,5 @@ def cleanup_old_logs():
     except Exception as e:
         logger.error(f"Error during log cleanup: {e}", exc_info=True)
     finally:
-        db.close()
-
-# Helper function for signature verification (Bonus) - needs implementation
-# import hmac
-# import hashlib
-# def calculate_signature(payload: dict, secret: str) -> str:
-#     """Calculates HMAC-SHA256 signature."""
-#     # Ensure payload is a consistent string representation (e.g., sorted keys)
-#     payload_str = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-#     signature = hmac.new(secret.encode('utf-8'), payload_str.encode('utf-8'), hashlib.sha256).hexdigest()
-#     return signature
+        if db:
+            db.close()
