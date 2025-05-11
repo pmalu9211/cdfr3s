@@ -10,3 +10,9 @@ pydantic-settings==2.2.1
 gevent==24.2.1
 # For UUID generation
 uuid==1.30
+
+# Testing dependencies
+pytest==8.1.1
+pytest-asyncio==0.23.6 # For testing async code with pytest
+pytest-mock==3.14.0 # For mocking objects
+httpx==0.27.0 # Recommended for testing FastAPI with TestClient
